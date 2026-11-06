@@ -24,6 +24,15 @@ UA = {
     "Referer": "https://www.nasdaq.com/",
 }
 SP500_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+# Titres qui ne sont pas des actions ordinaires (dette, actions de préférence, bons de souscription...) : exclus.
+NON_ACTIONS = (r"\d+(?:\.\d+)?\s?%|Preferred|\bNotes?\b|Debentures?|\bBonds?\b|Warrants?|\bRights\b"
+               r"|Tangible Equity Unit|Units?,? each consisting|Subordinated")
+# Références (pas des signaux) : marché américain, secteurs (SPDR et logiciel), marché français.
+REFERENCES = {"SPY": "S&P 500 (ETF)", "XLK": "Technologie (ETF)", "XLF": "Finance (ETF)", "XLV": "Santé (ETF)",
+              "XLY": "Consommation discrétionnaire (ETF)", "XLP": "Consommation de base (ETF)", "XLE": "Énergie (ETF)",
+              "XLI": "Industrie (ETF)", "XLB": "Matériaux (ETF)", "XLU": "Services publics (ETF)",
+              "XLRE": "Immobilier (ETF)", "XLC": "Communication (ETF)", "IGV": "Logiciel (ETF)",
+              "CAC.PA": "CAC 40 (ETF Amundi)"}
 SCREENER_URL = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&limit=10000&download=true"
 ICI = os.path.dirname(os.path.abspath(__file__))
 RACINE = os.path.dirname(ICI)
@@ -63,6 +72,9 @@ def univers_us():
     df = pd.DataFrame(rows)
     df["symbol"] = df["symbol"].astype(str).str.strip()
     df = df[~df["symbol"].str.contains(r"[\^ ]", regex=True)]          # actions de préférence, lignes vides
+    exclus = df["name"].astype(str).str.contains(NON_ACTIONS, regex=True, case=False)
+    print(f"{int(exclus.sum())} titres qui ne sont pas des actions ordinaires exclus (dette, préférence, bons...)")
+    df = df[~exclus]
     df["ticker"] = df["symbol"].map(yahoo)
     df["capitalisation"] = df["marketCap"].map(capitalisation)
     df["pays"] = df["country"].fillna("")
@@ -96,9 +108,15 @@ def univers_fr():
     return out
 
 
+def references():
+    return pd.DataFrame({"ticker": list(REFERENCES), "nom": list(REFERENCES.values()), "marche": "REF",
+                         "pays": "", "secteur": "", "industrie": "", "capitalisation": float("nan"),
+                         "devise": ["EUR" if t.endswith(".PA") else "USD" for t in REFERENCES], "sp500": False})
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
-    u = pd.concat([univers_us(), univers_fr()], ignore_index=True).drop_duplicates("ticker")
+    u = pd.concat([univers_us(), univers_fr(), references()], ignore_index=True).drop_duplicates("ticker")
     u.to_csv(os.path.join(OUT, "univers.csv"), index=False)
     print(f"univers : {len(u)} titres -> out/univers.csv")
 

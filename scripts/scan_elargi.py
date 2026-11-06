@@ -20,6 +20,14 @@ import json
 import numpy as np
 import pandas as pd
 
+NON_ACTIONS = (r"\d+(?:\.\d+)?\s?%|Preferred|\bNotes?\b|Debentures?|\bBonds?\b|Warrants?|\bRights\b"
+               r"|Tangible Equity Unit|Units?,? each consisting|Subordinated")
+# Secteurs du screener du Nasdaq et secteurs GICS -> ETF de secteur (comme le scanner du comité)
+SECTEUR_ETF = {"Technology": "XLK", "Information Technology": "XLK", "Finance": "XLF", "Financials": "XLF",
+               "Health Care": "XLV", "Consumer Discretionary": "XLY", "Consumer Staples": "XLP", "Energy": "XLE",
+               "Industrials": "XLI", "Basic Materials": "XLB", "Materials": "XLB", "Utilities": "XLU",
+               "Real Estate": "XLRE", "Telecommunications": "XLC", "Communication Services": "XLC"}
+
 
 def rsi_wilder(close, n=14):
     out = np.full(len(close), np.nan)
@@ -61,7 +69,7 @@ def seuil(wk_adj, ratio, dernier, cible=30.0):
     return round(lo, 2)
 
 
-def analyse(t, g, marche_13s):
+def analyse(t, g):
     g = g.sort_values("date").set_index("date")
     adj, close, vol = g["adj_close"].astype(float), g["close"].astype(float), g["volume"].astype(float)
     if len(adj) < 60:
@@ -87,7 +95,7 @@ def analyse(t, g, marche_13s):
            "rsi_mois": round(float(rm[-1]), 1) if len(rm) and np.isfinite(rm[-1]) else None,
            "histogramme_en_hausse": bool(h[-1] > h[-2]) if len(h) > 2 else None,
            "perf_13s": perf13, "pire_seance_13s": pire, "choc": bool(pire is not None and pire <= -0.10),
-           "nature": "marché" if (marche_13s is not None and marche_13s <= -0.10) else "action seule ou secteur"}
+           "historique_court": bool(len(w_adj) < 30)}
     if not semaine_close and len(w_adj) > 20:
         res["seuil_signal_vendredi"] = seuil(w_adj.to_numpy().copy(), ratio, float(close.iloc[-1]))
 
@@ -153,19 +161,30 @@ def main():
     fr = [perf13(t) for t in u.loc[u["marche"] == "FR", "ticker"]]
     fr = [x for x in fr if x is not None]
     sbf = float(np.median(fr)) if fr else None
+    cac = perf13("CAC.PA")
+    marche_fr = cac if cac is not None else sbf
+    etf13 = {e: perf13(e) for e in set(SECTEUR_ETF.values())}
     info = u.set_index("ticker").to_dict("index")
     lignes = []
     for t, g in groupes.items():
-        if t not in info:
+        if t not in info or info[t].get("marche") == "REF":
+            continue
+        if pd.Series([str(info[t].get("nom") or "")]).str.contains(NON_ACTIONS, regex=True, case=False).iloc[0]:
             continue
         m = info[t].get("marche", "US")
         try:
-            x = analyse(t, g, spy if m == "US" else sbf)
+            x = analyse(t, g)
         except Exception as e:  # données incomplètes
             print("erreur", t, e)
             continue
         if x is None:
             continue
+        etf = SECTEUR_ETF.get(str(info[t].get("secteur") or "")) if m == "US" else None
+        s13 = etf13.get(etf) if etf else None
+        ref = spy if m == "US" else marche_fr
+        x["etf_secteur"], x["perf_secteur_13s"] = etf, s13
+        x["nature"] = ("marché" if ref is not None and ref <= -0.10 else
+                       "secteur" if s13 is not None and s13 <= -0.10 else "action seule")
         x.update({"nom": info[t].get("nom"), "marche": m, "devise": info[t].get("devise") or ("EUR" if m == "FR" else "USD"),
                   "sp500": bool(info[t].get("sp500")) if pd.notna(info[t].get("sp500")) else False,
                   "capitalisation": info[t].get("capitalisation"), "secteur": info[t].get("secteur")})
@@ -175,17 +194,18 @@ def main():
     signaux = df[df["rsi_hebdo"] <= 30]
     proches = df[(df["rsi_hebdo"] > 30) & (df["rsi_hebdo"] <= 34)]
     fenetre = df[df["fenetre"].notna()] if "fenetre" in df else df.iloc[0:0]
-    res = {"genere_le": pd.Timestamp.now("UTC").isoformat(), "spy_13s": spy, "sbf120_median_13s": sbf,
+    res = {"genere_le": pd.Timestamp.now("UTC").isoformat(), "spy_13s": spy, "cac_13s": cac,
+           "sbf120_median_13s": sbf, "etf_secteurs_13s": etf13,
            "titres": int(len(df)), "signaux": json.loads(signaux.sort_values("rsi_hebdo").to_json(orient="records")),
            "proches_du_seuil": json.loads(proches.sort_values("rsi_hebdo").to_json(orient="records")),
            "fenetre_12_semaines": json.loads(fenetre.to_json(orient="records"))}
     json.dump(res, open(a.out, "w"), ensure_ascii=False, indent=1)
     hm = signaux[signaux["hors_methode"]]
     print(f"{len(df)} titres | {len(signaux)} à RSI hebdo <= 30 (dont {len(hm)} hors S&P 500) | "
-          f"{len(proches)} entre 30 et 34 | {len(fenetre)} dans la fenêtre de 12 semaines | SPY 13 sem. {spy} | SBF 120 {sbf}")
+          f"{len(proches)} entre 30 et 34 | {len(fenetre)} dans la fenêtre de 12 semaines | SPY 13 sem. {spy} | CAC {cac}")
     for _, s in hm.sort_values("rsi_hebdo").head(40).iterrows():
         print(f"  {s['ticker']:9s} {s['marche']} RSI {s['rsi_hebdo']:5.1f} cours {s['cours']} ({s['cours_le']}) "
-              f"13 sem. {s['perf_13s']:+.1%} choc {s['choc']} {s['nom']}")
+              f"13 sem. {s['perf_13s']:+.1%} {s['nature']} choc {s['choc']} {s['nom']}")
 
 
 if __name__ == "__main__":
