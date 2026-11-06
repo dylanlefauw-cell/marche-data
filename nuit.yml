@@ -1,0 +1,56 @@
+name: Cours de la nuit
+
+on:
+  schedule:
+    - cron: "20 1 * * 2-6"   # 1 h 20 UTC, du mardi au samedi : séances de la veille (mode jour)
+    - cron: "0 6 * * 0"      # dimanche 6 h UTC : rechargement complet (corrige les cours ajustés)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "complet ou jour"
+        required: false
+        default: "complet"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cours
+  cancel-in-progress: false
+
+jobs:
+  cours:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dépendances
+        run: pip install "yfinance>=0.2.54" "pandas>=2.2" pyarrow
+
+      - name: Univers (US > 2 Md$ et SBF 120)
+        run: python scripts/univers.py
+
+      - name: Cours
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          if [ -z "$MODE" ]; then
+            if [ "$(date -u +%u)" = "7" ]; then MODE=complet; else MODE=jour; fi
+          fi
+          python scripts/prix.py "$MODE"
+
+      - name: Scan RSI 30 élargi
+        run: python scripts/scan_elargi.py --prix out/prices_full.parquet --univers out/univers.csv --out out/scan_elargi.json
+
+      - name: Publication (release « data »)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view data >/dev/null 2>&1 || gh release create data --title "Données" --notes "Cours journaliers publiés chaque nuit par le workflow « Cours de la nuit »."
+          gh release upload data out/prices_full.parquet out/prices_3ans.parquet out/univers.csv out/rapport.json out/scan_elargi.json --clobber
